@@ -1,10 +1,10 @@
 C_CPP = g++
-C_FLAGS = -Wall -Wextra
+C_FLAGS = -Wall -Wextra -Wno-unused-parameter
 C_FLAGS_DEBUG = -g3 -fsanitize=address -fno-omit-frame-pointer -fno-optimize-sibling-calls
 C_LANG_VERSION = c++17
 C_LIBS = -lcrypto -lgtest -lpthread
 
-PATH_SRC_FILES = main.s fs.cpp sha256.cpp
+PATH_SRC_FILES = main.cpp fs.cpp sha256.cpp
 PATH_OUT_BIN = out
 PATH_OUT_BIN_EXTENTION = 
 

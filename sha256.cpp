@@ -14,7 +14,7 @@
 std::string printSha256(const char *path){
     unsigned char hash[SHA256_DIGEST_LENGTH];
     std::string hexHash("");
-    char hexChar[2*SHA256_DIGEST_LENGTH];
+    //char hexChar[2*SHA256_DIGEST_LENGTH];
 
     SHA256_CTX sha256;
     SHA256_Init(&sha256);

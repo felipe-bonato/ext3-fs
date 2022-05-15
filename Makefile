@@ -1,5 +1,5 @@
 C_CPP = g++
-C_FLAGS = -Wall -Wextra -Wno-unused-parameter
+C_FLAGS = -Wall -Wextra -Wno-unused-parameter -Wpedantic
 C_FLAGS_DEBUG = -g3 -fsanitize=address -fno-omit-frame-pointer -fno-optimize-sibling-calls
 C_LANG_VERSION = c++17
 C_LIBS = -lcrypto -lgtest -lpthread

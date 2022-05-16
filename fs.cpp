@@ -1,5 +1,6 @@
 #include "fs.h"
 
+#include <vector>
 #include <cmath>
 #include <fstream>
 #include <memory>
@@ -11,99 +12,121 @@ typedef int32_t i32;
 typedef size_t usize;
 typedef std::string str;
 
-class FileSystemManager {
-public:
-	FileSystemManager(std::string fsFileName, int blockSize, int numBlocks, int numInodes)
-	{
-		this->file = std::ofstream(fsFileName, std::ios::binary | std::ios::in | std::ios::out);
-		if(!file.is_open()){
-			throw std::runtime_error("Could not open file");
-		}
+void truncate_file(str& fileName){
+	std::fstream file{fileName, std::ios::out | std::ios::trunc};
+}
 
-		this->blockSize = blockSize;
-		this->numBlocks = numBlocks;
-		this->numInodes = numInodes;
+usize _getNumBitMapBytes(const c8 numBlocks)
+{
+	// Rounded up to the nearest byte;
+	return std::ceil(static_cast<double>(numBlocks) / 8.0);
+}
+
+usize _getMetaDataByteOffSet() { return 0; }
+
+usize _getBitMapByteOffSet() { return _getMetaDataByteOffSet() + 3; }
+
+usize _getINodesByteOffSet(const c8 numBlocks) {
+	// Here we need to get how many bytes are used by the bitmap cause it is dynamic
+	return _getBitMapByteOffSet() + _getNumBitMapBytes(numBlocks);
+}
+
+usize _getBlockByteOffSet(const c8 numBlocks, const c8 numInodes) {
+	return _getINodesByteOffSet(numBlocks)
+		+ numInodes*sizeof(INODE);
+}
+
+char* _iNodeToWritable(INODE& inode)
+{
+	return reinterpret_cast<char*>(&inode);
+}
+
+void _writeMetaData(std::fstream& file, const c8 blockSize, const c8 numBlocks, const c8 numInodes, const usize byteOffset)
+
+{
+	file.seekp(byteOffset)
+		.write(&blockSize, sizeof(c8))
+		.write(&numBlocks, sizeof(c8))
+		.write(&numInodes, sizeof(c8));
+}
+
+void _writeBitMap(std::fstream& file, const c8 numBlocks, const std::vector<bool> bitMap, const usize byteOffset)
+{
+	file.seekp(byteOffset);
+	for(size_t i = 0; i < _getNumBitMapBytes(numBlocks); i++){
+		char bit = i < bitMap.size() ? (bitMap[i] ? 1 : 0) : 0;
+		file.write(&bit, sizeof(c8));
+	}
+}
+
+// TODO: This io currently overwriting the whole byte
+void _writeBitMapAt(std::fstream& file, const usize position, const c8 value, const usize byteOffset)
+{
+	file.seekp(byteOffset + position);
+	file.write(&value, sizeof(c8));
+}
+
+void _writeBitMapFill(std::fstream& file, const c8 value, const c8 numBlocks, const usize byteOffset)
+{
+	file.seekp(byteOffset);
+	for(size_t i = 0; i < _getNumBitMapBytes(numBlocks); i++){
+		file.write(&value, sizeof(c8));
+	}
+}
+
+void _writeINodeRoot(std::fstream& file, const c8 numInodes, const usize byteOffset)
+{
+	INODE root{
+		0xdd, // IS_USED
+		0x01, // IS_DIR
+		"/", // NAME
+		0, // SIZE
+		{0, 0, 0}, // DIRECT_BLOCKS
+		{0, 0, 0}, // INDIRECT_BLOCKS
+		{0, 0, 0xcc} // DOUBLE_INDIRECT_BLOCKS
 	};
 
-	~FileSystemManager()
-	{
-		this->file.close();
+	file.seekp(byteOffset)
+		.write(_iNodeToWritable(root), sizeof(INODE));
+	// Because we writed we now need to update the bit map
+
+	_writeBitMapAt(file, 0x00, 0x01, _getBitMapByteOffSet());
+
+	// Fill the rest with 0
+	INODE empty{
+		0xee, // IS_USED
+		0, // IS_DIR
+		"\0", // NAME
+		0, // SIZE
+		{0, 0, 0}, // DIRECT_BLOCKS
+		{0, 0, 0}, // INDIRECT_BLOCKS
+		{0, 0, 0xff} // DOUBLE_INDIRECT_BLOCKS
 	};
-
-	void initFs()
-	{
-		this->_writeInitMetadata();
-		this->_writeBitMap();
-		this->_writeRootINode();
-		this->_writeZeroBlock();
+	
+	for(size_t i = 1; i < static_cast<usize>(numInodes); i++){
+		file.seekp(byteOffset + i*sizeof(INODE))
+			.write(_iNodeToWritable(empty), sizeof(INODE));
 	}
+}
 
-private:
-	std::ofstream file;
-	int blockSize;
-	int numBlocks;
-	int numInodes;
-
-    /* Helpers */
-	usize _getNumBitMapBytes()
-	{
-		// This is rounded up to the nearest byte;
-		return std::ceil(static_cast<double>(this->numBlocks) / 8.0);
+void _writeBlocksFill(std::fstream& file, const c8 value, const c8 numBlocks, const c8 blockSize, const usize byteOffset)
+{
+	for(size_t i = 0; i < static_cast<usize>(numBlocks); i++){
+		file.seekp(byteOffset + i*blockSize)
+			.write(&value, sizeof(c8))
+			.write(&value, sizeof(c8));
 	}
-
-	usize _getMetaDataByteOffSet() { return 0; }
-
-	usize _getBitMapByteOffSet() { return _getMetaDataByteOffSet() + 3; }
-
-	usize _getINodesByteOffSet() { return _getBitMapByteOffSet() + _getNumBitMapBytes(); }
-
-	usize _getBlockByteOffSet() { return _getINodesByteOffSet() + this->numBlocks * this->blockSize; }
-
-	void _writeInitMetadata() {
-		this->file.seekp(this->_getMetaDataByteOffSet())
-			<< static_cast<c8>(this->blockSize)
-			<< static_cast<c8>(this->numBlocks)
-			<< static_cast<c8>(this->numInodes);
-	}
-
-	void _writeBitMap() {
-		this->file.seekp(this->_getBitMapByteOffSet());
-		for(size_t byteIndex = 0; byteIndex < this->_getNumBitMapBytes(); byteIndex++){		
-			file << static_cast<c8>(0);
-		}
-	}
-
-	void _writeRootINode(){
-		INODE root = {
-			.IS_USED = 0x01,
-			.IS_DIR = 0x01,
-			// No aggregate initializer for the name cause gcc is bugged.
-			// See link: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=55227.
-			// Ps.: Should have used clang
-			"/",
-			.SIZE = 0,
-			.DIRECT_BLOCKS = { 0, 0, 0 },
-			.INDIRECT_BLOCKS = { 0, 0, 0 },
-			.DOUBLE_INDIRECT_BLOCKS = { 0, 0, 0 }
-		};
-
-		this->file.seekp(this->_getINodesByteOffSet())
-			<< reinterpret_cast<char*>(&root);
-	}
-
-	void _writeZeroBlock() {
-		this->file.seekp(this->_getBlockByteOffSet());
-		for(usize byteIndex = 0; byteIndex < static_cast<usize>(this->numBlocks); byteIndex++){
-			file << static_cast<c8>(0);
-		}
-	}
-
-};
+}
 
 void initFs(std::string fsFileName, int blockSize, int numBlocks, int numInodes)
 {
-	FileSystemManager fs(fsFileName, blockSize, numBlocks, numInodes);
-	fs.initFs();
+	truncate_file(fsFileName);
+	std::fstream file{ fsFileName, std::ios::binary | std::ios::in | std::ios::out };
+	_writeMetaData(file, blockSize, numBlocks, numInodes, _getMetaDataByteOffSet());
+	_writeBitMapFill(file, 0x00, numBlocks, _getBitMapByteOffSet());
+	_writeINodeRoot(file, numInodes, _getINodesByteOffSet(numBlocks));
+	// TODO: _writeRootIndex(file, _getRootIndexByteOffSet(numBlocks, numInodes));
+	_writeBlocksFill(file, 0x32, numBlocks, blockSize, _getBlockByteOffSet(numBlocks, numInodes));
 }
 
 void addFile(std::string fsFileName, std::string filePath, std::string fileContent)

@@ -12,40 +12,74 @@ typedef int32_t i32;
 typedef size_t usize;
 typedef std::string str;
 
-void truncate_file(str& fileName){
-	std::fstream file{fileName, std::ios::out | std::ios::trunc};
-}
+typedef struct {
+	unsigned char DIRECT_BLOCKS[3];    
+    unsigned char INDIRECT_BLOCKS[3];
+    unsigned char DOUBLE_INDIRECT_BLOCKS[3];
+} INODE_BLOCKS;
 
-usize _getNumBitMapBytes(const c8 numBlocks)
+void truncate_file(str& fileName){ std::fstream file{fileName, std::ios::out | std::ios::trunc}; }
+
+usize _getBitMapSize(const c8 numBlocks)
 {
 	// Rounded up to the nearest byte;
 	return std::ceil(static_cast<double>(numBlocks) / 8.0);
 }
 
-usize _getMetaDataByteOffSet() { return 0; }
+usize _getMetaDataOffSet() { return 0; }
 
-usize _getBitMapByteOffSet() { return _getMetaDataByteOffSet() + 3; }
+usize _getBlockSizeOffSet() { return _getMetaDataOffSet(); }
 
-usize _getINodesByteOffSet(const c8 numBlocks)
+usize _getNumBlocksOffSet() { return _getMetaDataOffSet() + 1; }
+
+usize _getNumINodesOffSet() { return _getMetaDataOffSet() + 2; }
+
+usize _getBitMapOffSet() { return _getMetaDataOffSet() + 3; }
+
+usize _getINodesOffSet(const c8 numBlocks)
 {
 	// Here we need to get how many bytes are used by the bitmap cause it is dynamic
-	return _getBitMapByteOffSet() + _getNumBitMapBytes(numBlocks);
+	return _getBitMapOffSet() + _getBitMapSize(numBlocks);
 }
 
-usize _getRootIndexByteOffSet(const c8 numBlocks, const c8 numInodes)
+usize _getRootIndexOffSet(const c8 numBlocks, const c8 numInodes)
 {
-	return _getINodesByteOffSet(numBlocks) + numInodes*sizeof(INODE);
+	return _getINodesOffSet(numBlocks) + numInodes*sizeof(INODE);
 }
 
-usize _getBlockByteOffSet(const c8 numBlocks, const c8 numInodes) {
-	return _getRootIndexByteOffSet(numBlocks, numInodes)
+usize _getBlocksOffSet(const c8 numBlocks, const c8 numInodes)
+{
+	return _getRootIndexOffSet(numBlocks, numInodes)
 		+ sizeof(c8); // Cause pointer is c8
 }
 
-char* _iNodeToWritable(INODE& inode)
+usize _blocksNeededToStore(usize content, c8 blockSize)
 {
-	return reinterpret_cast<char*>(&inode);
+	return std::ceil(static_cast<double>(content) / static_cast<double>(blockSize));
 }
+
+c8 _fetchBlockSize(std::fstream& fs)
+{
+	c8 blockSize;
+	fs.seekg(_getBlockSizeOffSet())
+		.read(&blockSize, sizeof(c8));
+	return blockSize;
+}
+
+c8 _fetchNumBlocks(std::fstream& fs)
+{
+	c8 numBlocks;
+	fs.seekg(_getNumBlocksOffSet())
+		.read(&numBlocks, sizeof(c8));
+	return numBlocks;
+}
+
+c8 _fetchBitMapSize(std::fstream& fs)
+{
+	return _getBitMapSize(_fetchNumBlocks(fs));
+}
+
+c8* _iNodeToWritable(INODE& inode) { return reinterpret_cast<c8*>(&inode);}
 
 void _writeMetaData(
 	std::fstream& fs,
@@ -67,7 +101,7 @@ void _writeBitMap(
 	const usize byteOffset
 ){
 	fs.seekp(byteOffset);
-	for(size_t i = 0; i < _getNumBitMapBytes(numBlocks); i++){
+	for(size_t i = 0; i < _getBitMapSize(numBlocks); i++){
 		char bit = i < bitMap.size() ? (bitMap[i] ? 1 : 0) : 0;
 		fs.write(&bit, sizeof(c8));
 	}
@@ -91,7 +125,7 @@ void _writeBitMapFill(
 	const usize byteOffset
 ){
 	fs.seekp(byteOffset);
-	for(size_t i = 0; i < _getNumBitMapBytes(numBlocks); i++){
+	for(size_t i = 0; i < _getBitMapSize(numBlocks); i++){
 		fs.write(&value, sizeof(c8));
 	}
 }
@@ -112,7 +146,7 @@ void _writeINodeRoot(std::fstream& fs, const c8 numInodes, const usize byteOffse
 		.write(_iNodeToWritable(root), sizeof(INODE));
 	// Because we writed we now need to update the bit map
 
-	_writeBitMapAt(fs, 0x00, 0x01, _getBitMapByteOffSet());
+	_writeBitMapAt(fs, 0x00, 0x01, _getBitMapOffSet());
 
 	// Fill the rest with 0
 	INODE empty{
@@ -151,20 +185,54 @@ void _writeBlocksFill(
 	}
 }
 
+c8 _findEmptyBlockIndex(std::fstream& fs)
+{
+	std::vector<c8> bitMap{};
+	for(usize i = 0; i < _fetchBitMapSize(fs); i++){
+
+	}
+}
+
+INODE_BLOCKS _writeBlocks(std::fstream& fs, std::fstream& file, str& fileContent)
+{
+	c8 blockSize{};
+	fs.seekg(_getBlockSizeOffSet())
+		.read(&blockSize, sizeof(c8));
+	
+	c8 blocksNeeded{_blocksNeededToStore(fileContent.size(), blockSize)};
+	
+	for(usize i = 0; i < blocksNeeded; i++){
+		fs.seekp(_findEmptyBlockIndex(fs))
+			.write(&(fileContent.c_str()[i*blockSize]), blockSize);
+	}
+}
+
 void initFs(std::string fsFileName, int blockSize, int numBlocks, int numInodes)
 {
 	truncate_file(fsFileName);
 	std::fstream fs{ fsFileName, std::ios::binary | std::ios::in | std::ios::out };
-	_writeMetaData(fs, blockSize, numBlocks, numInodes, _getMetaDataByteOffSet());
-	_writeBitMapFill(fs, 0x00, numBlocks, _getBitMapByteOffSet());
-	_writeINodeRoot(fs, numInodes, _getINodesByteOffSet(numBlocks));
-	_writeRootIndex(fs, _getRootIndexByteOffSet(numBlocks, numInodes));
-	_writeBlocksFill(fs, 0x00, numBlocks, blockSize, _getBlockByteOffSet(numBlocks, numInodes));
+	_writeMetaData(fs, blockSize, numBlocks, numInodes, _getMetaDataOffSet());
+	_writeBitMapFill(fs, 0x00, numBlocks, _getBitMapOffSet());
+	_writeINodeRoot(fs, numInodes, _getINodesOffSet(numBlocks));
+	_writeRootIndex(fs, _getRootIndexOffSet(numBlocks, numInodes));
+	_writeBlocksFill(fs, 0x00, numBlocks, blockSize, _getBlocksOffSet(numBlocks, numInodes));
 }
 
 void addFile(std::string fsFileName, std::string filePath, std::string fileContent)
 {
-
+	std::fstream fs{ fsFileName, std::ios::binary | std::ios::in | std::ios::out };
+	std::fstream file{ filePath, std::ios::binary | std::ios::in | std::ios::out };
+	auto blocksIndex = _writeBlocks(fs, file, fileContent);
+	/*auto [parent, name] = parseFileName(filePath);
+	_writeInode(fs, parent, INODE{
+		0x01, // IS_USED
+		0x00, // IS_DIR
+		name, // NAME
+		static_cast<c8>(fileContent.size()), // SIZE
+		blocksIndex.directBlocks, // DIRECT_BLOCKS
+		blocksIndex.indirectBlocks, // INDIRECT_BLOCKS
+		blocksIndex.doubleIndirectBlocks // DOUBLE_INDIRECT_BLOCKS
+	});*/
 }
 
 void addDir(std::string fsFileName, std::string dirPath)

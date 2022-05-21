@@ -18,13 +18,30 @@ typedef size_t usize;
 typedef std::string str;
 typedef std::fstream fd;
 
-typedef struct {
-	unsigned char DIRECT_BLOCKS[3];    
-    unsigned char INDIRECT_BLOCKS[3];
-    unsigned char DOUBLE_INDIRECT_BLOCKS[3];
-} INODE_BLOCKS;
+// Structural typedefs
+typedef std::vector<std::string> ParsedPathParents;
 
-INODE construct_inode(u8 is_used, u8 is_dir, str name, u8 size, INODE_BLOCKS blocks) {
+struct ParsedPath {
+	str name;
+	ParsedPathParents parents;
+};
+
+struct INodeBlocks {
+	unsigned char DIRECT_BLOCKS[3];    
+	unsigned char INDIRECT_BLOCKS[3];
+	unsigned char DOUBLE_INDIRECT_BLOCKS[3];
+};
+
+struct MetaData {
+	char blockSize;
+	char numBlocks;
+	char numINodes;
+};
+
+// Because the struct in fs.h was declared in a c style instead of a cpp style
+// we cannot create an actual constructor
+// The only option is this factory
+INODE INODE_factory(u8 is_used, u8 is_dir, str name, u8 size, INodeBlocks blocks) {
 	INODE inode;
 	inode.IS_USED = is_used;
 	inode.IS_DIR = is_dir;
@@ -45,12 +62,6 @@ INODE construct_inode(u8 is_used, u8 is_dir, str name, u8 size, INODE_BLOCKS blo
 	}
 	return inode;
 }
-
-typedef struct {
-	char blockSize;
-	char numBlocks;
-	char numINodes;
-} MetaData;
 
 void truncate_file(str& fileName){ std::fstream file{fileName, std::ios::out | std::ios::trunc}; }
 
@@ -137,32 +148,25 @@ void _writeMetaData(
 		.write(&numInodes, sizeof(c8));
 }
 
-typedef struct {
-	str name;
-	bool isDir;
-} __FilePathStruct;
-typedef std::vector<__FilePathStruct> ParsedFilePath;
-
-ParsedFilePath _parsePath(str& path)
+ParsedPath _parsePath(str& path)
 {
-	auto parsedPath = ParsedFilePath();
-	parsedPath.push_back({ "/", true });
+	ParsedPath parsedPath{};
 
-	std::string charBuff{};
-	for (size_t i = 1 /* We already have the root */; i < path.size(); i++) {
-		if (path[i] == '/') {
-			parsedPath.push_back({ charBuff, true });
-			charBuff.clear();
-			continue;
+	str strBuff{};
+	for(usize i = 0; i < path.size(); i++) {
+		if(path[i] == '/') {
+			// We root
+			if(strBuff.size() == 0){
+				strBuff = '/';
+			}
+			parsedPath.parents.push_back(strBuff);
+			strBuff.clear();
+		} else {
+			strBuff.push_back(path[i]);
 		}
-		if (i + 1 == path.size()) {
-			parsedPath.push_back({ charBuff, false });
-			break;
-		}
-
-		charBuff.push_back(path[i]);
 	}
-	
+	parsedPath.name = strBuff;
+
 	return parsedPath;
 }
 
@@ -277,23 +281,16 @@ usize _findEmptyBlockIndex(std::fstream& fs)
 	throw std::runtime_error("No free blocks");
 }
 
-INODE_BLOCKS _writeBlocks(std::fstream& fs, std::fstream& file, str& fileContent)
+INodeBlocks _writeBlocks(std::fstream& fs, str& fileContent)
 {
 	auto metaData = _fetchMetadata(fs);
 	
 	auto blocksNeeded{_blocksNeededToStore(fileContent.size(), metaData.blockSize)};
 	
-	INODE_BLOCKS blocks{};
+	INodeBlocks blocks{};
 
 	for(usize i = 0; i < blocksNeeded; i++){
 		auto blockIndex = _findEmptyBlockIndex(fs);
-		// This should work, but for some reason it doesn't ¯\_(ツ)_/¯
-		/*auto blockIndex = _findEmptyBlockIndex(fs);
-		auto strBlock = fileContent.substr(i*metaData.blockSize, metaData.blockSize).c_str();
-		fs.seekp(blockIndex)
-			.write(strBlock, metaData.blockSize)
-			.flush();*/
-		// this only works for block size of 2
 		fs.seekp(blockIndex)
 			.write(&fileContent[i*metaData.blockSize], sizeof(c8))
 			.write(&fileContent[i*metaData.blockSize+1], sizeof(c8));
@@ -310,9 +307,8 @@ INODE_BLOCKS _writeBlocks(std::fstream& fs, std::fstream& file, str& fileContent
 }
 
 // @returns the index of the new inode
-usize _writeINode(fd& fs, INODE inode)
+usize _writeINode(fd& fs, INODE& inode, MetaData& metaData)
 {
-	auto metaData = _fetchMetadata(fs);
 	for(usize i = 0; i < static_cast<usize>(_fetchMetadata(fs).numINodes); i++){
 		INODE inodeBuff{};
 		fs.seekg(_getINodesOffSet(metaData.numBlocks) + i*sizeof(INODE))
@@ -323,24 +319,46 @@ usize _writeINode(fd& fs, INODE inode)
 			return _getINodesOffSet(metaData.numBlocks) + i*sizeof(INODE);
 		}
 	}
+	throw std::runtime_error("No free space for inodes");
 }
 
-void _writeUpdateParent(fd& fs, ParsedFilePath path, usize inodeIndex)
+usize _findParentIndex(fd& fs, str& name, MetaData& metaData)
 {
-	auto metaData = _fetchMetadata(fs);
-	INODE inodeBuff{};
-	for (int i = path.size() - 1; i >= 0; i--)
-	{
+	for(usize i = 0; i < static_cast<usize>(metaData.numINodes); i++){
+		INODE inodeBuff{};
 		fs.seekg(_getINodesOffSet(metaData.numBlocks) + i*sizeof(INODE))
 			.read(_iNodeToWritable(inodeBuff), sizeof(INODE));
-		if(inodeBuff.IS_USED == 1){
-			if(inodeBuff.NAME == path[i]){
-				// We found the parent
-				//TODO: write to the blocks
-			}
+		if(inodeBuff.IS_USED == 1 && inodeBuff.IS_DIR == 1 && inodeBuff.NAME == name){
+			return _getINodesOffSet(metaData.numBlocks) + i*sizeof(INODE);
 		}
 	}
+	throw std::runtime_error("Parent does not exist");
+}
+
+void _writeUpdateParent(
+	fd& fs,
+	str& parentName,
+	usize inodeIndex,
+	INODE& inode,
+	MetaData& metaData
+){
 	
+	INODE inodeBuff{};
+	auto parentIndex = _findParentIndex(fs, parentName, metaData);
+	fs.seekg(parentIndex)
+		.read(_iNodeToWritable(inodeBuff), sizeof(INODE));
+	inodeBuff.SIZE += 1;
+
+	// Writing the children of parent in blocks
+	str indexAsStr{static_cast<char>(inodeIndex)};
+	auto blocks = _writeBlocks(fs, indexAsStr);
+	inodeBuff.DIRECT_BLOCKS[0] = blocks.DIRECT_BLOCKS[0];
+	inodeBuff.DIRECT_BLOCKS[1] = blocks.DIRECT_BLOCKS[1];
+	inodeBuff.DIRECT_BLOCKS[2] = blocks.DIRECT_BLOCKS[2];
+
+	// Writing the modifiend parent inode back
+	fs.seekp(parentIndex)
+		.write(_iNodeToWritable(inodeBuff), sizeof(INODE));
 }
 
 void initFs(std::string fsFileName, int blockSize, int numBlocks, int numInodes)
@@ -357,21 +375,19 @@ void initFs(std::string fsFileName, int blockSize, int numBlocks, int numInodes)
 void addFile(std::string fsFileName, std::string filePath, std::string fileContent)
 {
 	std::fstream fs{ fsFileName, std::ios::binary | std::ios::in | std::ios::out };
-	std::fstream file{ filePath, std::ios::binary | std::ios::in | std::ios::out };
-	auto blocksIndex = _writeBlocks(fs, file, fileContent);
-	
+	auto metaData = _fetchMetadata(fs);
+
+	auto blocksIndex = _writeBlocks(fs, fileContent);
 	auto fileStructure = _parsePath(filePath);
-
-	auto inodeIndex = _writeINode(fs, construct_inode(
-		1, // IS_USED
-		0, // IS_DIR
-		fileStructure.back().name, // NAME
-		fileContent.size(), // SIZE
+	auto inode = INODE_factory(
+		1,
+		0,
+		fileStructure.name,
+		fileContent.size(),
 		blocksIndex
-	));
-
-	_writeUpdateParent(fs, fileStructure, inodeIndex);
-	// Update parent directory size and add this node to the children list
+	);
+	auto inodeIndex = _writeINode(fs, inode, metaData);
+	_writeUpdateParent(fs, fileStructure.parents.back(), inodeIndex, inode, metaData);
 }
 
 void addDir(std::string fsFileName, std::string dirPath)

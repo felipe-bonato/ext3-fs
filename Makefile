@@ -38,6 +38,9 @@ run_debug: build_debug $(PATH_OUT_BIN_TARGET_DEV)
 run_release: build_release $(PATH_OUT_BIN_TARGET_DEV)
 	$(SYS_EXEC_CMD)$(PATH_OUT_BIN_TARGET_DEV)
 
+check:
+	$(C_CPP) $(PATH_SRC_FILES) $(C_FLAGS_TARGET_DEBUG) -o /dev/null
+
 .PHONY: clean
 clean:
 	rm $(PATH_OUT_BIN_TARGET_DEV) $(PATH_OUT_BIN_TARGET_DEBUG) $(PATH_OUT_BIN_TARGET_RELEASE)

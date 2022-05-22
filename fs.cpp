@@ -274,7 +274,7 @@ usize _findEmptyBlockIndex(std::fstream& fs)
 		for(usize bitIndex = 0; bitIndex < 8; bitIndex++){
 			c8 bit{_getBitNFromByte(bitMapByte, bitIndex)};
 			if(bit == 0){
-				return _fetchBlocksOffset(fs) + (byteIndex*8 + bitIndex)*_fetchMetadata(fs).blockSize;
+				return byteIndex*8 + bitIndex;
 			}
 		}
 	}
@@ -285,18 +285,20 @@ INodeBlocks _writeBlocks(std::fstream& fs, str& fileContent)
 {
 	auto metaData = _fetchMetadata(fs);
 	
-	auto blocksNeeded{_blocksNeededToStore(fileContent.size(), metaData.blockSize)};
-	
 	INodeBlocks blocks{};
 
-	for(usize i = 0; i < blocksNeeded; i++){
+	for(usize i = 0; i < _blocksNeededToStore(fileContent.size(), metaData.blockSize); i++){
 		auto blockIndex = _findEmptyBlockIndex(fs);
-		fs.seekp(blockIndex)
-			.write(&fileContent[i*metaData.blockSize], sizeof(c8))
-			.write(&fileContent[i*metaData.blockSize+1], sizeof(c8));
+		auto blockOffset = _fetchBlocksOffset(fs) + blockIndex*metaData.blockSize;
+		fs.seekp(blockOffset);
+		for(usize j = 0; j < static_cast<usize>(metaData.blockSize); j++){
+			if(i*metaData.blockSize + j < fileContent.size()){
+				fs.write(&fileContent[i*metaData.blockSize + j], sizeof(c8));
+			}
+		}
 		_writeBitMapAt(
 			fs,
-			(blockIndex - _getBlocksOffSet(metaData.numBlocks, metaData.numINodes)) / metaData.blockSize,
+			blockIndex,
 			0x01,
 			_getBitMapOffSet()
 		);
@@ -316,13 +318,13 @@ usize _writeINode(fd& fs, INODE& inode, MetaData& metaData)
 		if(inodeBuff.IS_USED == 0){
 			fs.seekp(_getINodesOffSet(metaData.numBlocks) + i*sizeof(INODE))
 				.write(_iNodeToWritable(inode), sizeof(INODE));
-			return _getINodesOffSet(metaData.numBlocks) + i*sizeof(INODE);
+			return i;
 		}
 	}
 	throw std::runtime_error("No free space for inodes");
 }
 
-usize _findParentIndex(fd& fs, str& name, MetaData& metaData)
+usize _findParentOffset(fd& fs, str& name, MetaData& metaData)
 {
 	for(usize i = 0; i < static_cast<usize>(metaData.numINodes); i++){
 		INODE inodeBuff{};
@@ -342,22 +344,29 @@ void _writeUpdateParent(
 	INODE& inode,
 	MetaData& metaData
 ){
-	
 	INODE inodeBuff{};
-	auto parentIndex = _findParentIndex(fs, parentName, metaData);
-	fs.seekg(parentIndex)
+	auto parentOffset = _findParentOffset(fs, parentName, metaData);
+	fs.seekg(parentOffset)
 		.read(_iNodeToWritable(inodeBuff), sizeof(INODE));
-	inodeBuff.SIZE += 1;
 
 	// Writing the children of parent in blocks
-	str indexAsStr{static_cast<char>(inodeIndex)};
-	auto blocks = _writeBlocks(fs, indexAsStr);
-	inodeBuff.DIRECT_BLOCKS[0] = blocks.DIRECT_BLOCKS[0];
-	inodeBuff.DIRECT_BLOCKS[1] = blocks.DIRECT_BLOCKS[1];
-	inodeBuff.DIRECT_BLOCKS[2] = blocks.DIRECT_BLOCKS[2];
+	// If parent is root, we need some special code
+	if(parentName == "/" && inodeBuff.SIZE < metaData.blockSize){
+		c8 inodeIndexAsChar = inodeIndex;
+		fs.seekp(
+			_getBlocksOffSet(metaData.numBlocks, metaData.numINodes) + inodeBuff.SIZE
+		).write(&inodeIndexAsChar, sizeof(c8));
+	} else {
+		str indexAsStr{static_cast<char>(inodeIndex)};
+		auto blocks = _writeBlocks(fs, indexAsStr);
+		for(usize i = inodeBuff.SIZE; i < 3; i++){
+			inodeBuff.DIRECT_BLOCKS[i] = blocks.DIRECT_BLOCKS[i];
+		}
+	}
+	inodeBuff.SIZE += 1;
 
 	// Writing the modifiend parent inode back
-	fs.seekp(parentIndex)
+	fs.seekp(parentOffset)
 		.write(_iNodeToWritable(inodeBuff), sizeof(INODE));
 }
 

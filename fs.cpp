@@ -11,15 +11,16 @@
 #include <memory>
 #include <string>
 
-typedef char c8;
-typedef uint8_t u8;
-typedef int32_t i32;
-typedef size_t usize;
-typedef std::string str;
-typedef std::fstream fd;
+// Type Aliases
+using c8 = char;
+using u8 = uint8_t;
+using i32 = int32_t;
+using usize = size_t;
+using str = std::string;
+using fd = std::fstream;
 
-// Structural typedefs
-typedef std::vector<std::string> ParsedPathParents;
+// Structural Aliases
+using ParsedPathParents = std::vector<std::string>;
 
 struct ParsedPath {
 	str name;
@@ -131,7 +132,6 @@ c8 _fetchBitMapByte(fd& fs, usize byteIndex)
 		.read(&buff, sizeof(c8));
 	return buff;
 }
-
 
 c8* _iNodeToWritable(INODE& inode) { return reinterpret_cast<c8*>(&inode);}
 
@@ -287,7 +287,17 @@ INodeBlocks _writeBlocks(std::fstream& fs, str& fileContent)
 	
 	INodeBlocks blocks{};
 
-	for(usize i = 0; i < _blocksNeededToStore(fileContent.size(), metaData.blockSize); i++){
+	// Even if thers nothing, every directory has awlways one block
+	if(fileContent.size() == 0){
+		auto blockIndex = _findEmptyBlockIndex(fs);
+		_writeBitMapAt(fs, blockIndex, 0x01, _getBitMapOffSet());
+		blocks.DIRECT_BLOCKS[0] = blockIndex;
+		return blocks;
+	}
+	
+	auto blocksNeededToStore = _blocksNeededToStore(fileContent.size(), metaData.blockSize);
+
+	for(usize i = 0; i < blocksNeededToStore; i++){
 		auto blockIndex = _findEmptyBlockIndex(fs);
 		auto blockOffset = _fetchBlocksOffset(fs) + blockIndex*metaData.blockSize;
 		fs.seekp(blockOffset);
@@ -296,12 +306,7 @@ INodeBlocks _writeBlocks(std::fstream& fs, str& fileContent)
 				fs.write(&fileContent[i*metaData.blockSize + j], sizeof(c8));
 			}
 		}
-		_writeBitMapAt(
-			fs,
-			blockIndex,
-			0x01,
-			_getBitMapOffSet()
-		);
+		_writeBitMapAt(fs, blockIndex, 0x01, _getBitMapOffSet());
 		blocks.DIRECT_BLOCKS[i] = blockIndex;
 	}
 
@@ -311,7 +316,7 @@ INodeBlocks _writeBlocks(std::fstream& fs, str& fileContent)
 // @returns the index of the new inode
 usize _writeINode(fd& fs, INODE& inode, MetaData& metaData)
 {
-	for(usize i = 0; i < static_cast<usize>(_fetchMetadata(fs).numINodes); i++){
+	for(usize i = 0; i < static_cast<usize>(metaData.numINodes); i++){
 		INODE inodeBuff{};
 		fs.seekg(_getINodesOffSet(metaData.numBlocks) + i*sizeof(INODE))
 			.read(_iNodeToWritable(inodeBuff), sizeof(INODE));
@@ -344,30 +349,35 @@ void _writeUpdateParent(
 	INODE& inode,
 	MetaData& metaData
 ){
-	INODE inodeBuff{};
+	INODE parent{};
 	auto parentOffset = _findParentOffset(fs, parentName, metaData);
 	fs.seekg(parentOffset)
-		.read(_iNodeToWritable(inodeBuff), sizeof(INODE));
+		.read(_iNodeToWritable(parent), sizeof(INODE));
 
-	// Writing the children of parent in blocks
-	// If parent is root, we need some special code
-	if(parentName == "/" && inodeBuff.SIZE < metaData.blockSize){
-		c8 inodeIndexAsChar = inodeIndex;
+	c8 inodeIndexAsChar = inodeIndex;
+	// Cause every directory awlays has at least one block alocated
+	if(parent.SIZE == 0){
 		fs.seekp(
-			_getBlocksOffSet(metaData.numBlocks, metaData.numINodes) + inodeBuff.SIZE
+			_getBlocksOffSet(metaData.numBlocks, metaData.numINodes) + parent.SIZE
+		).write(&inodeIndexAsChar, sizeof(c8));
+	} else if(parent.SIZE % metaData.blockSize != 0) {
+		auto blockWithEmptySpace = parent.DIRECT_BLOCKS[parent.SIZE];
+		fs.seekp(
+			_getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
+			+ (parent.SIZE % metaData.blockSize)
 		).write(&inodeIndexAsChar, sizeof(c8));
 	} else {
 		str indexAsStr{static_cast<char>(inodeIndex)};
 		auto blocks = _writeBlocks(fs, indexAsStr);
-		for(usize i = inodeBuff.SIZE; i < 3; i++){
-			inodeBuff.DIRECT_BLOCKS[i] = blocks.DIRECT_BLOCKS[i];
+		for(usize i = parent.SIZE; i < 3; i++){
+			parent.DIRECT_BLOCKS[i] = blocks.DIRECT_BLOCKS[i];
 		}
 	}
-	inodeBuff.SIZE += 1;
+	parent.SIZE += 1;
 
 	// Writing the modifiend parent inode back
 	fs.seekp(parentOffset)
-		.write(_iNodeToWritable(inodeBuff), sizeof(INODE));
+		.write(_iNodeToWritable(parent), sizeof(INODE));
 }
 
 void initFs(std::string fsFileName, int blockSize, int numBlocks, int numInodes)
@@ -375,17 +385,17 @@ void initFs(std::string fsFileName, int blockSize, int numBlocks, int numInodes)
 	truncate_file(fsFileName);
 	std::fstream fs{ fsFileName, std::ios::binary | std::ios::in | std::ios::out };
 	_writeMetaData(fs, blockSize, numBlocks, numInodes, _getMetaDataOffSet());
-	_writeBitMapFill(fs, 0x00, numBlocks, _getBitMapOffSet());
+	_writeBitMapFill(fs, 0, numBlocks, _getBitMapOffSet());
 	_writeINodeRoot(fs, numInodes, _getINodesOffSet(numBlocks));
 	_writeRootIndex(fs, _getRootIndexOffSet(numBlocks, numInodes));
-	_writeBlocksFill(fs, 0x00, numBlocks, blockSize, _getBlocksOffSet(numBlocks, numInodes));
+	_writeBlocksFill(fs, 0, numBlocks, blockSize, _getBlocksOffSet(numBlocks, numInodes));
 }
 
 void addFile(std::string fsFileName, std::string filePath, std::string fileContent)
 {
 	std::fstream fs{ fsFileName, std::ios::binary | std::ios::in | std::ios::out };
 	auto metaData = _fetchMetadata(fs);
-
+	
 	auto blocksIndex = _writeBlocks(fs, fileContent);
 	auto fileStructure = _parsePath(filePath);
 	auto inode = INODE_factory(
@@ -401,7 +411,25 @@ void addFile(std::string fsFileName, std::string filePath, std::string fileConte
 
 void addDir(std::string fsFileName, std::string dirPath)
 {
+	std::fstream fs{ fsFileName, std::ios::binary | std::ios::in | std::ios::out };
+	auto metaData = _fetchMetadata(fs);
 
+	auto dirStructure = _parsePath(dirPath);
+
+	str empty{""}; // Cause every directory must have at least one block alocated
+	auto blocksIndex = _writeBlocks(fs, empty);
+	fs.flush();
+	auto inode = INODE_factory(
+		1,
+		1,
+		dirStructure.name,
+		0,
+		blocksIndex
+	);
+	auto inodeIndex = _writeINode(fs, inode, metaData);
+	fs.flush();
+	_writeUpdateParent(fs, dirStructure.parents.back(), inodeIndex, inode, metaData);
+	fs.flush();
 }
 
 void remove(std::string fsFileName, std::string path)

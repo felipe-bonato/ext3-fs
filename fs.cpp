@@ -358,7 +358,7 @@ void _writeUpdateParent(
 	// Cause every directory awlays has at least one block alocated
 	if(parent.SIZE == 0){
 		fs.seekp(
-			_getBlocksOffSet(metaData.numBlocks, metaData.numINodes) + parent.SIZE
+			_getBlocksOffSet(metaData.numBlocks, metaData.numINodes) + metaData.blockSize*parent.DIRECT_BLOCKS[0]
 		).write(&inodeIndexAsChar, sizeof(c8));
 	} else if(parent.SIZE % metaData.blockSize != 0) {
 		auto blockWithEmptySpace = parent.DIRECT_BLOCKS[parent.SIZE];

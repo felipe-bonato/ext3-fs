@@ -28,6 +28,15 @@ struct ParsedPath {
 };
 
 struct INodeBlocks {
+	INodeBlocks() = default;
+	INodeBlocks(INODE& iNode) {
+		for (int i = 0; i < 3; i++) {
+			this->DIRECT_BLOCKS[i] = iNode.DIRECT_BLOCKS[i];
+			this->INDIRECT_BLOCKS[i] = iNode.INDIRECT_BLOCKS[i];
+			this->DOUBLE_INDIRECT_BLOCKS[i] = iNode.DOUBLE_INDIRECT_BLOCKS[i];
+		}
+	}
+
 	unsigned char DIRECT_BLOCKS[3];    
 	unsigned char INDIRECT_BLOCKS[3];
 	unsigned char DOUBLE_INDIRECT_BLOCKS[3];
@@ -54,11 +63,7 @@ INODE INODE_factory(u8 is_used, u8 is_dir, str name, u8 size, INodeBlocks blocks
 	inode.SIZE = size;
 	for (int i = 0; i < 3; i++) {
 		inode.DIRECT_BLOCKS[i] = blocks.DIRECT_BLOCKS[i];
-	}
-	for (int i = 0; i < 3; i++) {
 		inode.INDIRECT_BLOCKS[i] = blocks.INDIRECT_BLOCKS[i];
-	}
-	for (int i = 0; i < 3; i++) {
 		inode.DOUBLE_INDIRECT_BLOCKS[i] = blocks.DOUBLE_INDIRECT_BLOCKS[i];
 	}
 	return inode;
@@ -101,6 +106,12 @@ usize _getBlocksOffSet(const c8 numBlocks, const c8 numInodes)
 		+ sizeof(c8); // Cause pointer is c8
 }
 
+usize _getBlocksOffSet(MetaData& metaData)
+{
+	return _getRootIndexOffSet(metaData.numBlocks, metaData.numINodes)
+		+ sizeof(c8); // Cause pointer is c8
+}
+
 usize _blocksNeededToStore(usize content, c8 blockSize)
 {
 	return std::ceil(static_cast<double>(content) / static_cast<double>(blockSize));
@@ -134,6 +145,20 @@ c8 _fetchBitMapByte(fd& fs, usize byteIndex)
 }
 
 c8* _iNodeToWritable(INODE& inode) { return reinterpret_cast<c8*>(&inode);}
+
+INODE _fetchINodeByIndex(fd& fs, usize index, MetaData& metaData)
+{
+	INODE inode{};
+	fs.seekg(_getINodesOffSet(metaData.numBlocks) + index*sizeof(INODE))
+		.read(reinterpret_cast<char*>(&inode), sizeof(INODE));
+	return inode;
+}
+
+void _writeINodeByIndex(fd& fs, INODE inode, usize index, MetaData& metaData)
+{
+	fs.seekp(_getINodesOffSet(metaData.numBlocks) + index*sizeof(INODE))
+		.write(_iNodeToWritable(inode), sizeof(INODE));
+}
 
 void _writeMetaData(
 	std::fstream& fs,
@@ -194,7 +219,9 @@ void _writeBitMapAt(
 	auto bitMapOffset = _getBitMapOffSet() + byteIndex;
 	fs.seekg(bitMapOffset)
 		.read(&buff, sizeof(c8));
-	buff |= static_cast<c8>(value) << (position % 8);
+	buff = value ?
+		buff | 0x01 << (position % 8)
+		: buff & ~(0x01 << (position % 8));
 	fs.seekp(bitMapOffset)
 		.write(&buff, sizeof(c8));
 }
@@ -329,20 +356,25 @@ usize _writeINode(fd& fs, INODE& inode, MetaData& metaData)
 	throw std::runtime_error("No free space for inodes");
 }
 
-usize _findParentOffset(fd& fs, str& name, MetaData& metaData)
+usize _findINodeIndexByName(fd& fs, str& name, MetaData& metaData)
 {
 	for(usize i = 0; i < static_cast<usize>(metaData.numINodes); i++){
 		INODE inodeBuff{};
 		fs.seekg(_getINodesOffSet(metaData.numBlocks) + i*sizeof(INODE))
 			.read(_iNodeToWritable(inodeBuff), sizeof(INODE));
-		if(inodeBuff.IS_USED == 1 && inodeBuff.IS_DIR == 1 && inodeBuff.NAME == name){
-			return _getINodesOffSet(metaData.numBlocks) + i*sizeof(INODE);
+		if(inodeBuff.IS_USED == 1 && inodeBuff.NAME == name){
+			return i;
 		}
 	}
 	throw std::runtime_error("Parent does not exist");
 }
 
-void _writeUpdateParent(
+usize _findINodeOffsetByName(fd& fs, str& name, MetaData& metaData)
+{
+	return _getINodesOffSet(metaData.numBlocks) + _findINodeIndexByName(fs, name, metaData)*sizeof(INODE);
+}
+
+void _updateParentAddChild(
 	fd& fs,
 	str& parentName,
 	usize inodeIndex,
@@ -350,7 +382,7 @@ void _writeUpdateParent(
 	MetaData& metaData
 ){
 	INODE parent{};
-	auto parentOffset = _findParentOffset(fs, parentName, metaData);
+	auto parentOffset = _findINodeOffsetByName(fs, parentName, metaData);
 	fs.seekg(parentOffset)
 		.read(_iNodeToWritable(parent), sizeof(INODE));
 
@@ -358,10 +390,12 @@ void _writeUpdateParent(
 	// Cause every directory awlays has at least one block alocated
 	if(parent.SIZE == 0){
 		fs.seekp(
-			_getBlocksOffSet(metaData.numBlocks, metaData.numINodes) + metaData.blockSize*parent.DIRECT_BLOCKS[0]
+			_getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
+			+ metaData.blockSize*parent.DIRECT_BLOCKS[0]
 		).write(&inodeIndexAsChar, sizeof(c8));
 	} else if(parent.SIZE % metaData.blockSize != 0) {
-		auto blockWithEmptySpace = parent.DIRECT_BLOCKS[parent.SIZE];
+		// This probably has a couple bugs, but it works
+		// auto blockWithEmptySpace = parent.DIRECT_BLOCKS[parent.SIZE];
 		fs.seekp(
 			_getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
 			+ (parent.SIZE % metaData.blockSize)
@@ -378,6 +412,95 @@ void _writeUpdateParent(
 	// Writing the modifiend parent inode back
 	fs.seekp(parentOffset)
 		.write(_iNodeToWritable(parent), sizeof(INODE));
+}
+
+void _removeINode(fd& fs, usize inodeIndex, MetaData& metaData)
+{
+	INODE empty_inode{};
+	fs.seekp(_getINodesOffSet(metaData.numBlocks) + inodeIndex*sizeof(INODE))
+		.write(_iNodeToWritable(empty_inode), sizeof(INODE));
+}
+
+INodeBlocks _fetchINodeBlocks(fd& fs, usize inodeIndex, MetaData& metaData)
+{
+	auto iNode = _fetchINodeByIndex(fs, inodeIndex, metaData);
+	INodeBlocks blocks{iNode};
+	return blocks;
+}
+
+void _updateFreeBlocks(fd& fs, INodeBlocks& blocks, MetaData& metaData)
+{
+	for(usize i = 0; i < 3; i++){
+		if(blocks.DIRECT_BLOCKS[i] != 0){
+			_writeBitMapAt(fs, blocks.DIRECT_BLOCKS[i], 0x00, _getBitMapOffSet());
+		}
+	}
+}
+
+void _updateParentRemoveChild(
+	fd& fs,
+	usize parentIndex,
+	usize childIndex,
+	MetaData& metaData
+){
+	// Modifique o pai P de F da seguinte forma:
+	//     Seja B a lista de filhos de P armazenado na região de blocos. 
+	//     Se B[k] = F e 0 ≤ k < P.SIZE -1 (ou seja, F não é o último filho de P), faça
+	//         B[j] = B[j+1] para j=k, k+1, …, P.SIZE - 2 (copie da esq para direita)
+	//     Decremente P.SIZE
+	//     Se um bloco foi desocupado, marque-o como livre no mapa de bits
+
+	INODE parent = _fetchINodeByIndex(fs, parentIndex, metaData);
+	
+	c8 childToBeRemovedBlockIndex{-1};
+	c8 childIndexInParentINode{-1};
+	bool flagExit{false};
+	for(usize blockIndex = 0; blockIndex < 3 /* direct blocks size */ && !flagExit; blockIndex++){
+		for(usize byteIndex = 0; byteIndex < static_cast<usize>(metaData.blockSize); byteIndex++){
+			fs.seekg(
+				_getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
+					+ parent.DIRECT_BLOCKS[blockIndex]*metaData.blockSize
+					+ byteIndex
+			).read(&childToBeRemovedBlockIndex, sizeof(c8));
+			if(static_cast<usize>(childToBeRemovedBlockIndex) == childIndex){
+				childIndexInParentINode = blockIndex;
+				flagExit = true;
+				break;
+			}
+		}
+	}
+
+	
+	for(usize i = childIndex; i <= static_cast<usize>(parent.SIZE - 1); i++){
+		usize curBlockIndexInINode = floor(i / metaData.blockSize);
+		usize curBlockIndex = parent.DIRECT_BLOCKS[curBlockIndexInINode];
+		usize curByteIndex = i % metaData.blockSize;
+		usize curBlockOffSet = _getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
+			+ curBlockIndex*metaData.blockSize
+			+ curByteIndex;
+
+		usize nextBlockIndexInINode = floor((i + 1) / metaData.blockSize);
+		usize nextBlockIndex = parent.DIRECT_BLOCKS[nextBlockIndexInINode];
+		usize nextByteIndex = (i + 1) % metaData.blockSize;
+		usize nextBlockOffSet = _getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
+			+ nextBlockIndex*metaData.blockSize
+			+ nextByteIndex;
+
+		c8 next{};
+		fs.seekg(curBlockOffSet).read(&next, sizeof(c8));
+		fs.seekp(nextBlockOffSet).write(&next, sizeof(c8));
+	}
+	
+	
+	if(parent.IS_DIR != 1 and parent.SIZE != 0){
+		_writeBitMapAt(fs, parent.DIRECT_BLOCKS[childIndexInParentINode], 0, _getBitMapOffSet());
+	}
+	fs.flush();
+	parent.SIZE--;
+	//parent.DIRECT_BLOCKS[childIndexInParentINode] = 0;
+	_writeINodeByIndex(fs, parent, parentIndex, metaData);
+	fs.flush();
+
 }
 
 void initFs(std::string fsFileName, int blockSize, int numBlocks, int numInodes)
@@ -398,15 +521,10 @@ void addFile(std::string fsFileName, std::string filePath, std::string fileConte
 	
 	auto blocksIndex = _writeBlocks(fs, fileContent);
 	auto fileStructure = _parsePath(filePath);
-	auto inode = INODE_factory(
-		1,
-		0,
-		fileStructure.name,
-		fileContent.size(),
-		blocksIndex
-	);
+	auto inode = INODE_factory(1, 0, fileStructure.name, fileContent.size(), blocksIndex);
 	auto inodeIndex = _writeINode(fs, inode, metaData);
-	_writeUpdateParent(fs, fileStructure.parents.back(), inodeIndex, inode, metaData);
+
+	_updateParentAddChild(fs, fileStructure.parents.back(), inodeIndex, inode, metaData);
 }
 
 void addDir(std::string fsFileName, std::string dirPath)
@@ -414,27 +532,30 @@ void addDir(std::string fsFileName, std::string dirPath)
 	std::fstream fs{ fsFileName, std::ios::binary | std::ios::in | std::ios::out };
 	auto metaData = _fetchMetadata(fs);
 
-	auto dirStructure = _parsePath(dirPath);
 
 	str empty{""}; // Cause every directory must have at least one block alocated
 	auto blocksIndex = _writeBlocks(fs, empty);
-	fs.flush();
-	auto inode = INODE_factory(
-		1,
-		1,
-		dirStructure.name,
-		0,
-		blocksIndex
-	);
+	
+	auto dirStructure = _parsePath(dirPath);
+	auto inode = INODE_factory(1, 1, dirStructure.name,	0, blocksIndex);
 	auto inodeIndex = _writeINode(fs, inode, metaData);
-	fs.flush();
-	_writeUpdateParent(fs, dirStructure.parents.back(), inodeIndex, inode, metaData);
-	fs.flush();
+
+	_updateParentAddChild(fs, dirStructure.parents.back(), inodeIndex, inode, metaData);
 }
 
 void remove(std::string fsFileName, std::string path)
 {
-	
+	std::fstream fs{ fsFileName, std::ios::binary | std::ios::in | std::ios::out };
+	auto metaData = _fetchMetadata(fs);
+
+	auto dirStructure = _parsePath(path);
+	auto iNodeIndex = _findINodeIndexByName(fs, dirStructure.name, metaData);
+	auto iNodeBlocks = _fetchINodeBlocks(fs, iNodeIndex, metaData);
+	_updateFreeBlocks(fs, iNodeBlocks, metaData);
+	_removeINode(fs, iNodeIndex, metaData);
+
+	auto parentName = dirStructure.parents.back();
+	_updateParentRemoveChild(fs, _findINodeIndexByName(fs, parentName, metaData), iNodeIndex, metaData);
 }
 
 void move(std::string fsFileName, std::string oldPath, std::string newPath)

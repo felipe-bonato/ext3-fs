@@ -3,6 +3,21 @@
  * - Refactor for fetch and get functions accept only file metadata as argument
  */
 
+/**
+ * Classes
+ * Disk Descriptor: Access the disk
+ * MetaDataHandler: Handles metadata in disk
+ * INodesHandler: Handles inodes in disk
+ * BlocksHandler: Handles blocks in disk
+ * BitMapHandler: Handles the bitmap in disk
+ * StartHandler: Handles start of the file system in disk
+ * INode: Represents an inode struct
+ * Block: Represents a block struct
+ * BlocksList: Represents a group of blocks
+ * BitMap: Represents the bitmap
+ * BitMapByte: Represents a byte of the bitmap
+ */
+
 #include "fs.h"
 
 #include <vector>
@@ -362,7 +377,7 @@ usize _findINodeIndexByName(fd& fs, str& name, MetaData& metaData)
 		INODE inodeBuff{};
 		fs.seekg(_getINodesOffSet(metaData.numBlocks) + i*sizeof(INODE))
 			.read(_iNodeToWritable(inodeBuff), sizeof(INODE));
-		if(inodeBuff.IS_USED == 1 && inodeBuff.NAME == name){
+		if(inodeBuff.IS_USED == 1 && name.compare(inodeBuff.NAME) == 0){
 			return i;
 		}
 	}
@@ -493,7 +508,7 @@ void _updateParentRemoveChild(
 	
 	
 	if(parent.IS_DIR != 1 and parent.SIZE != 0){
-		_writeBitMapAt(fs, parent.DIRECT_BLOCKS[childIndexInParentINode], 0, _getBitMapOffSet());
+		_writeBitMapAt(fs, parent.DIRECT_BLOCKS[static_cast<usize>(childIndexInParentINode)], 0, _getBitMapOffSet());
 	}
 	fs.flush();
 	parent.SIZE--;
@@ -501,6 +516,110 @@ void _updateParentRemoveChild(
 	_writeINodeByIndex(fs, parent, parentIndex, metaData);
 	fs.flush();
 
+}
+
+void _updateParentMoveChildFrom(
+	fd& fs,
+	usize fromParentIndex,
+	usize childIndex,
+	MetaData& metaData
+){
+	INODE parent = _fetchINodeByIndex(fs, fromParentIndex, metaData);
+	
+	c8 childToBeRemovedBlockIndex{-1};
+	c8 childIndexInParentINode{-1};
+	bool flagExit{false};
+	for(usize blockIndex = 0; blockIndex < 3 /* direct blocks size */ && !flagExit; blockIndex++){
+		for(usize byteIndex = 0; byteIndex < static_cast<usize>(metaData.blockSize); byteIndex++){
+			fs.seekg(
+				_getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
+					+ parent.DIRECT_BLOCKS[blockIndex]*metaData.blockSize
+					+ byteIndex
+			).read(&childToBeRemovedBlockIndex, sizeof(c8));
+			if(static_cast<usize>(childToBeRemovedBlockIndex) == childIndex){
+				childIndexInParentINode = parent.DIRECT_BLOCKS[blockIndex]*metaData.blockSize
+					+ byteIndex;
+				flagExit = true;
+				break;
+			}
+		}
+	}
+
+	
+	for(usize i = childIndexInParentINode; i <= static_cast<usize>(parent.SIZE - 1); i++){
+		usize curBlockIndexInINode = floor(i / metaData.blockSize);
+		usize curBlockIndex = parent.DIRECT_BLOCKS[curBlockIndexInINode];
+		usize curByteIndex = i % metaData.blockSize;
+		usize curBlockOffSet = _getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
+			+ curBlockIndex*metaData.blockSize
+			+ curByteIndex;
+
+		usize nextBlockIndexInINode = floor((i + 1) / metaData.blockSize);
+		usize nextBlockIndex = parent.DIRECT_BLOCKS[nextBlockIndexInINode];
+		usize nextByteIndex = (i + 1) % metaData.blockSize;
+		usize nextBlockOffSet = _getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
+			+ nextBlockIndex*metaData.blockSize
+			+ nextByteIndex;
+
+		c8 next{};
+		fs.seekg(curBlockOffSet).read(&next, sizeof(c8));
+		fs.seekp(nextBlockOffSet).write(&next, sizeof(c8));
+	}
+	
+	
+	if(parent.IS_DIR != 1 and parent.SIZE != 0){
+		_writeBitMapAt(fs, parent.DIRECT_BLOCKS[static_cast<usize>(childIndexInParentINode)], 0, _getBitMapOffSet());
+	}
+	fs.flush();
+	parent.SIZE--;
+	//parent.DIRECT_BLOCKS[childIndexInParentINode] = 0;
+	_writeINodeByIndex(fs, parent, fromParentIndex, metaData);
+	fs.flush();
+
+}
+
+void _updateParentMoveChildTo(
+	fd& fs,
+	usize toParentIndex,
+	usize childIndex,
+	MetaData& metaData
+){
+	INODE parent = _fetchINodeByIndex(fs, toParentIndex, metaData);
+	
+	usize emptyBlockIndexInParentINode = parent.SIZE / metaData.blockSize;
+	usize emptyByteIndex = parent.SIZE % metaData.blockSize;
+	bool needToAllocNewBlock = emptyByteIndex == 0;
+
+	usize emptyBlockIndex;
+	if(needToAllocNewBlock){
+		emptyBlockIndex = _findEmptyBlockIndex(fs);
+		_writeBitMapAt(fs, emptyBlockIndex, 1, _getBitMapOffSet());
+		parent.DIRECT_BLOCKS[emptyBlockIndexInParentINode] = emptyBlockIndex;
+	} else {
+		emptyBlockIndex = parent.DIRECT_BLOCKS[emptyBlockIndexInParentINode];
+	}
+	
+	fs.seekp(
+		_getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
+			+ emptyBlockIndex*metaData.blockSize
+			+ emptyByteIndex
+	).write(reinterpret_cast<char *>(&childIndex), sizeof(c8));
+
+	parent.SIZE++;
+	_writeINodeByIndex(fs, parent, toParentIndex, metaData);
+}
+
+bool _areTheSameDirPath(const ParsedPath& path1, const ParsedPath& path2)
+{
+	if(path1.parents.size() != path2.parents.size()){
+		return false;
+	}
+	for(usize i = 0; i < path1.parents.size(); i++){
+		if(path1.parents[i] != path2.parents[i]){
+			return false;
+		}
+	}
+	return true;
 }
 
 void initFs(std::string fsFileName, int blockSize, int numBlocks, int numInodes)
@@ -560,5 +679,25 @@ void remove(std::string fsFileName, std::string path)
 
 void move(std::string fsFileName, std::string oldPath, std::string newPath)
 {
+	std::fstream fs{ fsFileName, std::ios::binary | std::ios::in | std::ios::out };
+	auto metaData = _fetchMetadata(fs);
+
+	auto newDirStructure = _parsePath(newPath);
+	auto newParentIndex = _findINodeIndexByName(fs, newDirStructure.parents.back(), metaData);
+	//auto newParent = _fetchINodeByIndex(fs, newParentIndex, metaData);
+
+	auto oldDirStructure = _parsePath(oldPath);
+	auto oldParentIndex = _findINodeIndexByName(fs, oldDirStructure.parents.back(), metaData);
+	//auto oldParent = _fetchINodeByIndex(fs, oldParentIndex, metaData);
 	
+	auto movedFileIndex = _findINodeIndexByName(fs, oldDirStructure.name, metaData);
+
+	_updateParentMoveChildFrom(fs, oldParentIndex, movedFileIndex, metaData);
+	_updateParentMoveChildTo(fs, newParentIndex, movedFileIndex, metaData);
+	
+	auto movedFile = _fetchINodeByIndex(fs, movedFileIndex, metaData);
+	for(usize i = 0; i < newDirStructure.name.size() and i < 10; i++){
+		movedFile.NAME[i] = newDirStructure.name[i];
+	}
+	_writeINodeByIndex(fs, movedFile, movedFileIndex, metaData);
 }

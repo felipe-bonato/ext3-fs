@@ -169,6 +169,17 @@ INODE _fetchINodeByIndex(fd& fs, usize index, MetaData& metaData)
 	return inode;
 }
 
+c8 _fetchBlockByIndexAndOffset(fd& fs, usize index, usize offset, MetaData& metaData)
+{
+	c8 block{};
+	fs.seekg(
+		_getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
+		+ index*metaData.blockSize
+		+ offset*sizeof(c8)
+	).read(&block, sizeof(c8));
+	return block;
+}
+
 void _writeINodeByIndex(fd& fs, INODE inode, usize index, MetaData& metaData)
 {
 	fs.seekp(_getINodesOffSet(metaData.numBlocks) + index*sizeof(INODE))
@@ -226,8 +237,7 @@ void _writeBitMap(
 void _writeBitMapAt(
 	std::fstream& fs,
 	const usize position,
-	const bool value,
-	const usize byteOffset
+	const bool value
 ){
 	c8 buff{};
 	auto byteIndex = position / 8;
@@ -269,7 +279,7 @@ void _writeINodeRoot(std::fstream& fs, const c8 numInodes, const usize byteOffse
 		.write(_iNodeToWritable(root), sizeof(INODE));
 	// Because we writed we now need to update the bit map
 
-	_writeBitMapAt(fs, 0x00, 0x01, _getBitMapOffSet());
+	_writeBitMapAt(fs, 0x00, 0x01);
 
 	// Fill the rest with 0
 	INODE empty{
@@ -332,7 +342,7 @@ INodeBlocks _writeBlocks(std::fstream& fs, str& fileContent)
 	// Even if thers nothing, every directory has awlways one block
 	if(fileContent.size() == 0){
 		auto blockIndex = _findEmptyBlockIndex(fs);
-		_writeBitMapAt(fs, blockIndex, 0x01, _getBitMapOffSet());
+		_writeBitMapAt(fs, blockIndex, 0x01);
 		blocks.DIRECT_BLOCKS[0] = blockIndex;
 		return blocks;
 	}
@@ -348,7 +358,7 @@ INodeBlocks _writeBlocks(std::fstream& fs, str& fileContent)
 				fs.write(&fileContent[i*metaData.blockSize + j], sizeof(c8));
 			}
 		}
-		_writeBitMapAt(fs, blockIndex, 0x01, _getBitMapOffSet());
+		_writeBitMapAt(fs, blockIndex, 0x01);
 		blocks.DIRECT_BLOCKS[i] = blockIndex;
 	}
 
@@ -447,7 +457,7 @@ void _updateFreeBlocks(fd& fs, INodeBlocks& blocks, MetaData& metaData)
 {
 	for(usize i = 0; i < 3; i++){
 		if(blocks.DIRECT_BLOCKS[i] != 0){
-			_writeBitMapAt(fs, blocks.DIRECT_BLOCKS[i], 0x00, _getBitMapOffSet());
+			_writeBitMapAt(fs, blocks.DIRECT_BLOCKS[i], 0x00);
 		}
 	}
 }
@@ -458,13 +468,6 @@ void _updateParentRemoveChild(
 	usize childIndex,
 	MetaData& metaData
 ){
-	// Modifique o pai P de F da seguinte forma:
-	//     Seja B a lista de filhos de P armazenado na região de blocos. 
-	//     Se B[k] = F e 0 ≤ k < P.SIZE -1 (ou seja, F não é o último filho de P), faça
-	//         B[j] = B[j+1] para j=k, k+1, …, P.SIZE - 2 (copie da esq para direita)
-	//     Decremente P.SIZE
-	//     Se um bloco foi desocupado, marque-o como livre no mapa de bits
-
 	INODE parent = _fetchINodeByIndex(fs, parentIndex, metaData);
 	
 	c8 childToBeRemovedBlockIndex{-1};
@@ -508,7 +511,7 @@ void _updateParentRemoveChild(
 	
 	
 	if(parent.IS_DIR != 1 and parent.SIZE != 0){
-		_writeBitMapAt(fs, parent.DIRECT_BLOCKS[static_cast<usize>(childIndexInParentINode)], 0, _getBitMapOffSet());
+		_writeBitMapAt(fs, parent.DIRECT_BLOCKS[static_cast<usize>(childIndexInParentINode)], 0);
 	}
 	fs.flush();
 	parent.SIZE--;
@@ -518,95 +521,108 @@ void _updateParentRemoveChild(
 
 }
 
+struct _findBlockIndexInINodeReturn {
+	c8 directBlockIndex;
+	c8 byteIndex;
+	c8 blockIndex;
+};
+
+_findBlockIndexInINodeReturn _findBlockIndexInINode(fd& fs, INODE& iNode, c8 searchData, MetaData& metaData)
+{
+	for(c8 i = 0; i < iNode.SIZE; i++){
+		c8 directBlockIndex = i / metaData.blockSize;
+		c8 byteIndex = i % metaData.blockSize;
+		auto searchBlock = _fetchBlockByIndexAndOffset(
+			fs,
+			iNode.DIRECT_BLOCKS[static_cast<usize>(directBlockIndex)],
+			byteIndex,
+			metaData
+		);
+		if(searchBlock == searchData){
+			return { directBlockIndex, byteIndex, i };
+		}
+	}
+	throw new std::runtime_error("Could not find block in INode");
+}
+
+usize _getBlockOffsetByIndexInInode(fd& fs, INODE& inode, usize index, MetaData& metaData)
+{
+	usize blockIndexInINode = index / metaData.blockSize;
+	usize blockIndex = inode.DIRECT_BLOCKS[blockIndexInINode];
+	usize byteIndex = index % metaData.blockSize;
+	usize blockOffSet = _getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
+		+ blockIndex*metaData.blockSize
+		+ byteIndex;
+	return blockOffSet;
+}
+
 void _updateParentMoveChildFrom(
 	fd& fs,
 	usize fromParentIndex,
 	usize childIndex,
 	MetaData& metaData
 ){
-	INODE parent = _fetchINodeByIndex(fs, fromParentIndex, metaData);
-	
-	c8 childToBeRemovedBlockIndex{-1};
-	c8 childIndexInParentINode{-1};
-	bool flagExit{false};
-	for(usize blockIndex = 0; blockIndex < 3 /* direct blocks size */ && !flagExit; blockIndex++){
-		for(usize byteIndex = 0; byteIndex < static_cast<usize>(metaData.blockSize); byteIndex++){
-			fs.seekg(
-				_getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
-					+ parent.DIRECT_BLOCKS[blockIndex]*metaData.blockSize
-					+ byteIndex
-			).read(&childToBeRemovedBlockIndex, sizeof(c8));
-			if(static_cast<usize>(childToBeRemovedBlockIndex) == childIndex){
-				childIndexInParentINode = parent.DIRECT_BLOCKS[blockIndex]*metaData.blockSize
-					+ byteIndex;
-				flagExit = true;
-				break;
-			}
-		}
+/*
+Seja B a lista de filhos de P armazenado na região de blocos. 
+Se B[k] = F e 0 ≤ k < P.SIZE -1 (ou seja, F não é o último filho de P), faça
+	B[j] = B[j+1] para j=k, k+1, …, P.SIZE - 2 (copie da esq para direita)
+Decremente P.SIZE
+Se um bloco foi desocupado, marque-o como livre no mapa de bits
+*/
+	INODE fromParent = _fetchINodeByIndex(fs, fromParentIndex, metaData);
+
+	auto [ directBlockIndex, byteIndex, blockIndex ] = _findBlockIndexInINode(fs, fromParent, childIndex, metaData);
+
+	for(usize i = blockIndex; i < static_cast<usize>(fromParent.SIZE - 1); i++){
+		c8 nextBlockData;
+
+		auto nextBlockOffSet = _getBlockOffsetByIndexInInode(fs, fromParent, i + 1, metaData);
+		fs.seekg(nextBlockOffSet).read(&nextBlockData, sizeof(c8));
+		
+		auto curBlockOffSet = _getBlockOffsetByIndexInInode(fs, fromParent, i, metaData);
+		fs.seekp(curBlockOffSet).write(&nextBlockData, sizeof(c8));
+
+		fs.flush();
 	}
 
-	
-	for(usize i = childIndexInParentINode; i <= static_cast<usize>(parent.SIZE - 1); i++){
-		usize curBlockIndexInINode = floor(i / metaData.blockSize);
-		usize curBlockIndex = parent.DIRECT_BLOCKS[curBlockIndexInINode];
-		usize curByteIndex = i % metaData.blockSize;
-		usize curBlockOffSet = _getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
-			+ curBlockIndex*metaData.blockSize
-			+ curByteIndex;
-
-		usize nextBlockIndexInINode = floor((i + 1) / metaData.blockSize);
-		usize nextBlockIndex = parent.DIRECT_BLOCKS[nextBlockIndexInINode];
-		usize nextByteIndex = (i + 1) % metaData.blockSize;
-		usize nextBlockOffSet = _getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
-			+ nextBlockIndex*metaData.blockSize
-			+ nextByteIndex;
-
-		c8 next{};
-		fs.seekg(curBlockOffSet).read(&next, sizeof(c8));
-		fs.seekp(nextBlockOffSet).write(&next, sizeof(c8));
+	// If it was the last block, we need to remove it from the bitmap
+	if(fromParent.SIZE % metaData.blockSize == 1 and fromParent.SIZE > 1){
+		_writeBitMapAt(fs, fromParent.DIRECT_BLOCKS[fromParent.SIZE / metaData.blockSize], 0);
+		fs.flush();
 	}
-	
-	
-	if(parent.IS_DIR != 1 and parent.SIZE != 0){
-		_writeBitMapAt(fs, parent.DIRECT_BLOCKS[static_cast<usize>(childIndexInParentINode)], 0, _getBitMapOffSet());
-	}
+
+	fromParent.SIZE--;
+
+	_writeINodeByIndex(fs, fromParent, fromParentIndex, metaData);
 	fs.flush();
-	parent.SIZE--;
-	//parent.DIRECT_BLOCKS[childIndexInParentINode] = 0;
-	_writeINodeByIndex(fs, parent, fromParentIndex, metaData);
-	fs.flush();
+}
 
+bool _hasBlockWithEmptySpace(usize iNodeSize, MetaData& metaData){
+	return (iNodeSize % metaData.blockSize) > 0 or iNodeSize == 0;
 }
 
 void _updateParentMoveChildTo(
 	fd& fs,
 	usize toParentIndex,
-	usize childIndex,
+	c8 childIndex,
 	MetaData& metaData
 ){
-	INODE parent = _fetchINodeByIndex(fs, toParentIndex, metaData);
-	
-	usize emptyBlockIndexInParentINode = parent.SIZE / metaData.blockSize;
-	usize emptyByteIndex = parent.SIZE % metaData.blockSize;
-	bool needToAllocNewBlock = emptyByteIndex == 0;
+	auto toParent = _fetchINodeByIndex(fs, toParentIndex, metaData);
 
-	usize emptyBlockIndex;
-	if(needToAllocNewBlock){
-		emptyBlockIndex = _findEmptyBlockIndex(fs);
-		_writeBitMapAt(fs, emptyBlockIndex, 1, _getBitMapOffSet());
-		parent.DIRECT_BLOCKS[emptyBlockIndexInParentINode] = emptyBlockIndex;
-	} else {
-		emptyBlockIndex = parent.DIRECT_BLOCKS[emptyBlockIndexInParentINode];
+	if(!_hasBlockWithEmptySpace(toParent.SIZE, metaData)){
+		auto emptyBlockIndex = _findEmptyBlockIndex(fs);
+		_writeBitMapAt(fs, emptyBlockIndex, 1);
+		auto blockIndexInINode = toParent.SIZE / metaData.blockSize;
+		toParent.DIRECT_BLOCKS[blockIndexInINode] = emptyBlockIndex;
 	}
-	
-	fs.seekp(
-		_getBlocksOffSet(metaData.numBlocks, metaData.numINodes)
-			+ emptyBlockIndex*metaData.blockSize
-			+ emptyByteIndex
-	).write(reinterpret_cast<char *>(&childIndex), sizeof(c8));
 
-	parent.SIZE++;
-	_writeINodeByIndex(fs, parent, toParentIndex, metaData);
+	fs.seekp(
+		_getBlockOffsetByIndexInInode(fs, toParent, toParent.SIZE, metaData)
+	).write(&childIndex, sizeof(c8));
+	
+	toParent.SIZE++;
+
+	_writeINodeByIndex(fs, toParent, toParentIndex, metaData);
 }
 
 bool _areTheSameDirPath(const ParsedPath& path1, const ParsedPath& path2)
@@ -692,9 +708,11 @@ void move(std::string fsFileName, std::string oldPath, std::string newPath)
 	
 	auto movedFileIndex = _findINodeIndexByName(fs, oldDirStructure.name, metaData);
 
-	_updateParentMoveChildFrom(fs, oldParentIndex, movedFileIndex, metaData);
-	_updateParentMoveChildTo(fs, newParentIndex, movedFileIndex, metaData);
-	
+	if(!_areTheSameDirPath(oldDirStructure, newDirStructure)){
+		_updateParentMoveChildFrom(fs, oldParentIndex, movedFileIndex, metaData);
+		_updateParentMoveChildTo(fs, newParentIndex, movedFileIndex, metaData);
+	}
+
 	auto movedFile = _fetchINodeByIndex(fs, movedFileIndex, metaData);
 	for(usize i = 0; i < newDirStructure.name.size() and i < 10; i++){
 		movedFile.NAME[i] = newDirStructure.name[i];

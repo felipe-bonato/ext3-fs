@@ -588,6 +588,7 @@ Se um bloco foi desocupado, marque-o como livre no mapa de bits
 	// If it was the last block, we need to remove it from the bitmap
 	if(fromParent.SIZE % metaData.blockSize == 1 and fromParent.SIZE > 1){
 		_writeBitMapAt(fs, fromParent.DIRECT_BLOCKS[fromParent.SIZE / metaData.blockSize], 0);
+		fromParent.DIRECT_BLOCKS[fromParent.SIZE / metaData.blockSize] = 0x00;
 		fs.flush();
 	}
 

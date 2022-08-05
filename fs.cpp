@@ -1,23 +1,3 @@
-/**
- * TODO:
- * - Refactor for fetch and get functions accept only file metadata as argument
- */
-
-/**
- * Classes
- * Disk Descriptor: Access the disk
- * MetaDataHandler: Handles metadata in disk
- * INodesHandler: Handles inodes in disk
- * BlocksHandler: Handles blocks in disk
- * BitMapHandler: Handles the bitmap in disk
- * StartHandler: Handles start of the file system in disk
- * INode: Represents an inode struct
- * Block: Represents a block struct
- * BlocksList: Represents a group of blocks
- * BitMap: Represents the bitmap
- * BitMapByte: Represents a byte of the bitmap
- */
-
 #include "fs.h"
 
 #include <vector>
@@ -188,15 +168,12 @@ void _writeINodeByIndex(fd& fs, INODE inode, usize index, MetaData& metaData)
 
 void _writeMetaData(
 	std::fstream& fs,
-	const c8 blockSize,
-	const c8 numBlocks,
-	const c8 numInodes,
-	const usize byteOffset
+	const MetaData& metaData
 ){
-	fs.seekp(byteOffset)
-		.write(&blockSize, sizeof(c8))
-		.write(&numBlocks, sizeof(c8))
-		.write(&numInodes, sizeof(c8));
+	fs.seekp(_getMetaDataOffSet())
+		.write(&metaData.blockSize, sizeof(c8))
+		.write(&metaData.numBlocks, sizeof(c8))
+		.write(&metaData.numINodes, sizeof(c8));
 }
 
 ParsedPath _parsePath(str& path)
@@ -643,7 +620,8 @@ void initFs(std::string fsFileName, int blockSize, int numBlocks, int numInodes)
 {
 	truncate_file(fsFileName);
 	std::fstream fs{ fsFileName, std::ios::binary | std::ios::in | std::ios::out };
-	_writeMetaData(fs, blockSize, numBlocks, numInodes, _getMetaDataOffSet());
+	MetaData metaData{blockSize, numBlocks, numInodes};
+	_writeMetaData(fs, metaData);
 	_writeBitMapFill(fs, 0, numBlocks, _getBitMapOffSet());
 	_writeINodeRoot(fs, numInodes, _getINodesOffSet(numBlocks));
 	_writeRootIndex(fs, _getRootIndexOffSet(numBlocks, numInodes));
